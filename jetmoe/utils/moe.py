@@ -45,8 +45,10 @@ class MoE(nn.Module):
         else:
             self.bias = None
 
-        self.input_linear = ParallelExperts(num_experts, input_size, hidden_size * 2 if glu else hidden_size)
-        self.output_linear = ParallelExperts(num_experts, hidden_size, input_size)
+        self.input_linear = ParallelExperts(
+            num_experts, input_size, hidden_size * 2 if glu else hidden_size)
+        self.output_linear = ParallelExperts(
+            num_experts, hidden_size, input_size)
 
         self.top_k = min(top_k, self.num_experts)
         self.activation = activation
@@ -107,11 +109,17 @@ class MoE(nn.Module):
             h = self.activation(h)
         expert_outputs = self.output_linear(h, self.expert_size)
 
+        # 将专家输出乘以对应的门控值。
         expert_outputs = expert_outputs * self.batch_gates[:, None]
 
-        zeros = torch.zeros((bsz * length, self.input_size), dtype=expert_outputs.dtype, device=expert_outputs.device)
+        # 使用 index_add 方法将乘以门控值的专家输出张量根据 batch_index 分散到全零张量 zeros 中，得到混合输出张量 y。
+        zeros = torch.zeros((bsz * length, self.input_size),
+                            dtype=expert_outputs.dtype, device=expert_outputs.device)
         y = zeros.index_add(0, self.batch_index, expert_outputs)
+
+        # 将混合输出张量 y 重新整形为三维张量，形状与输入张量 x 相同。
         y = y.view(bsz, length, self.input_size)
+        # 如果设置了偏置项，则将偏置项添加到输出张量 y 中。
         if self.bias is not None:
             y = y + self.bias
         return y, loss
@@ -133,7 +141,8 @@ class MoE(nn.Module):
                 h = self.activation(h) * g
             else:
                 h = self.activation(h)
-            y = F.linear(h, self.output_linear.weight[expert_idx]) * top_k_gates[0, i]
+            y = F.linear(
+                h, self.output_linear.weight[expert_idx]) * top_k_gates[0, i]
 
             y_list.append(y)
 
@@ -202,17 +211,25 @@ class MoE(nn.Module):
             Tensor: Output tensor.
             float: Gating loss.
         """
+        # 解析输入张量的形状，获取批次大小（bsz）、序列长度（length）和输入特征维度（emb_size）。
         bsz, length, emb_size = x.size()
+        # 将输入张量 x 重新整形为二维张量，形状为 (bsz * length, emb_size)，以便进行批次级别的处理。
         x = x.reshape(-1, emb_size)
+        # 调用 compute_gate 方法计算门控损失。
         loss = self.compute_gate(x)
 
+        # 根据 batch_index 提取每个样本所属的专家输入，形状为 (num_experts, expert_size)。
         expert_inputs = x[self.batch_index]
+        # 将专家输入传递给 input_linear 层，使用专家大小信息进行线性变换，得到专家输出。
         expert_outputs = self.input_linear(expert_inputs, self.expert_size)
 
+        # 创建一个全零张量 zeros，形状为 (bsz * length * top_k, hidden_size)，数据类型和设备与 expert_outputs 相同。
         zeros = torch.zeros(
             (bsz * length * self.top_k, self.hidden_size), dtype=expert_outputs.dtype, device=expert_outputs.device
         )
+        # 使用 index_add 方法将专家输出根据 index_sorted_experts 分散到全零张量 zeros 中，得到混合输出张量 y。
         y = zeros.index_add(0, self.index_sorted_experts, expert_outputs)
+        # 将混合输出张量 y 重新整形为四维张量，形状为(bsz, length, top_k, hidden_size)。
         y = y.view(bsz, length, self.top_k, -1)
         return y, loss
 
@@ -240,7 +257,8 @@ class MoE(nn.Module):
         y_list = []
         for i in range(self.top_k):
             expert_idx = self.top_k_indices[0, i]
-            y = F.linear(x[i], self.output_linear.weight[expert_idx]) * self.top_k_gates[0, i]
+            y = F.linear(x[i], self.output_linear.weight[expert_idx]
+                         ) * self.top_k_gates[0, i]
             y_list.append(y)
         y = sum(y_list)
         y = y.view(bsz, length, self.input_size)
@@ -260,17 +278,27 @@ class MoE(nn.Module):
             Tensor: Reduced output tensor.
         """
 
+        # 解析输入张量的形状，获取批次大小（bsz）、序列长度（length）、专家数量（k）和嵌入维度（emb_size）。
         bsz, length, k, emb_size = x.size()
+        # 将输入张量 x 重新整形为二维张量，形状为 (bsz * length * k, emb_size)。
         x = x.reshape(-1, emb_size)
 
+        # 根据 index_sorted_experts 提取每个样本所属的专家输入，形状为 (num_experts, expert_size)。
         expert_inputs = x[self.index_sorted_experts]
+        # 将专家输入传递给 output_linear 层，使用专家大小信息进行线性变换，得到专家输出。
         expert_outputs = self.output_linear(expert_inputs, self.expert_size)
 
+        # 将专家输出乘以对应的门控值。
         expert_outputs = expert_outputs * self.batch_gates[:, None]
 
-        zeros = torch.zeros((bsz * length, self.input_size), dtype=expert_outputs.dtype, device=expert_outputs.device)
+        # 创建一个全零张量 zeros，形状为 (bsz * length, input_size)，数据类型和设备与 expert_outputs 相同。
+        zeros = torch.zeros((bsz * length, self.input_size),
+                            dtype=expert_outputs.dtype, device=expert_outputs.device)
+        # 使用 index_add 方法将乘以门控值的专家输出张量根据 batch_index 分散到全零张量 zeros 中，得到降维后的输出张量 y。
         y = zeros.index_add(0, self.batch_index, expert_outputs)
+        # 将降维后的输出张量 y 重新整形为三维张量，形状为 (bsz, length, input_size)。
         y = y.view(bsz, length, self.input_size)
+        # 如果设置了偏置项，则将偏置项添加到输出张量 y 中。
         if self.bias is not None:
             y = y + self.bias
         return y

@@ -22,12 +22,17 @@ def compute_gating(k: int, num_experts: int, top_k_gates: torch.Tensor, top_k_in
     """
     zeros = torch.zeros([top_k_gates.size(0), num_experts], dtype=top_k_gates.dtype, device=top_k_gates.device)
     gates = zeros.scatter(1, top_k_indices, 1)
+    # 计算每个专家被选择的次数，即每列中值为 1 的数量，得到专家大小（expert_size）。
     expert_size = gates.long().sum(0)
+    # 将顶部 k 个专家的门控值和索引展平为一维张量，并对专家索引进行排序。
     top_k_gates = top_k_gates.flatten()
     top_k_experts = top_k_indices.flatten()
     _, index_sorted_experts = top_k_experts.sort(0)
+    # 根据专家索引的排序结果，确定每个样本所属的批次索引（batch_index）。
     batch_index = index_sorted_experts.div(k, rounding_mode="trunc")
+    # 提取排序后的专家门控值，得到批次级别的门控值（batch_gates）。
     batch_gates = top_k_gates[index_sorted_experts]
+
     return batch_gates, batch_index, expert_size, index_sorted_experts
 
 

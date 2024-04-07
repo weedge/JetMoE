@@ -178,7 +178,8 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=torch.int32)
     indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
+    cu_seqlens = F.pad(torch.cumsum(
+        seqlens_in_batch, dim=0, dtype=torch.int32), (1, 0))
     return (
         indices,
         cu_seqlens,
@@ -199,7 +200,8 @@ class JetMoERMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * \
+            torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
 
@@ -211,7 +213,8 @@ class JetMoERotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2, dtype=torch.int64).float().to(device) / self.dim))
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim,
+                          2, dtype=torch.int64).float().to(device) / self.dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         # Build here to make `torch.jit.trace` work.
@@ -221,18 +224,22 @@ class JetMoERotaryEmbedding(nn.Module):
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
-        t = torch.arange(self.max_seq_len_cached, device=device, dtype=torch.int64).type_as(self.inv_freq)
+        t = torch.arange(self.max_seq_len_cached, device=device,
+                         dtype=torch.int64).type_as(self.inv_freq)
 
         freqs = torch.outer(t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistent=False)
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
         if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+            self._set_cos_sin_cache(
+                seq_len=seq_len, device=x.device, dtype=x.dtype)
 
         return (
             self.cos_cached[:seq_len].to(dtype=x.dtype),
@@ -244,7 +251,7 @@ class JetMoERotaryEmbedding(nn.Module):
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -316,7 +323,8 @@ class JetMoEAttention(nn.Module):
             glu=False,
         )
 
-        self.kv_proj = torch.nn.Linear(config.hidden_size, self.kv_projection_size * 2, bias=False)
+        self.kv_proj = torch.nn.Linear(
+            config.hidden_size, self.kv_projection_size * 2, bias=False)
 
         self.rotary_emb = JetMoERotaryEmbedding(
             config.kv_channels,
@@ -346,9 +354,16 @@ class JetMoEAttention(nn.Module):
         query_states, aux_loss = self.experts.map(hidden_states)
         key_states, value_states = self.kv_proj(hidden_states).chunk(2, dim=-1)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.hidden_size_per_attention_head).transpose(
-            1, 2
-        )
+        # 首先，对查询状态进行形状变换。
+        # 原始的 query_states 张量的形状可能是 (bsz * q_len, num_heads * hidden_size_per_attention_head)，
+        # 这里通过 view 方法将其变换为 (bsz, q_len, num_heads, hidden_size_per_attention_head) 的形状。
+        # 这样变换后，每个位置的查询向量被分成了 num_heads 个头，每个头的维度是 hidden_size_per_attention_head。
+        # .transpose(1, 2)：然后，对第二维和第三维进行转置操作。
+        # 这一步的目的是将每个头的维度（hidden_size_per_attention_head）放到第三维，以便后续进行多头注意力的计算。
+        # 转置后的形状为 (bsz, num_heads, q_len, hidden_size_per_attention_head)。
+        query_states = query_states.view(
+            bsz, q_len, self.num_heads, self.hidden_size_per_attention_head
+        ).transpose(1, 2)
         key_states = key_states.view(
             bsz, q_len, self.num_key_value_heads, self.hidden_size_per_attention_head
         ).transpose(1, 2)
@@ -364,15 +379,18 @@ class JetMoEAttention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value.get_usable_length(
+                kv_seq_len, self.layer_idx)
+
+        # RoPE
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(
             query_states, key_states, cos, sin, position_ids, unsqueeze_dim=1
         )
-
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = key_states.repeat(1, self.top_k, 1, 1)
@@ -397,7 +415,8 @@ class JetMoEAttention(nn.Module):
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
         # attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
         attn_output = torch.matmul(attn_weights, value_states)
 
@@ -408,7 +427,8 @@ class JetMoEAttention(nn.Module):
             )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.top_k, self.kv_projection_size)
+        attn_output = attn_output.reshape(
+            bsz, q_len, self.top_k, self.kv_projection_size)
 
         attn_output = self.experts.reduce(attn_output)
         attn_output = attn_output.view(bsz, q_len, -1)
@@ -469,7 +489,8 @@ class JetMoESdpaAttention(JetMoEAttention):
 
         kv_seq_len = key_states.shape[2]
         if past_key_value is not None:
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value.get_usable_length(
+                kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         query_states, key_states = apply_rotary_pos_emb(
@@ -478,7 +499,8 @@ class JetMoESdpaAttention(JetMoEAttention):
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = key_states.repeat(1, self.top_k, 1, 1)
         value_states = value_states.repeat(1, self.top_k, 1, 1)
@@ -507,7 +529,8 @@ class JetMoESdpaAttention(JetMoEAttention):
         )
 
         attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.top_k, self.kv_projection_size)
+        attn_output = attn_output.reshape(
+            bsz, q_len, self.top_k, self.kv_projection_size)
 
         attn_output = self.experts.reduce(attn_output)
         attn_output = attn_output.view(bsz, q_len, -1)
@@ -535,7 +558,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
         **kwargs,
     ) -> Union[
         Tuple[torch.Tensor, Tuple[torch.Tensor]],
-        Optional[Tuple[torch.Tensor, Tuple[torch.Tensor], Tuple[torch.Tensor, ...]]],
+        Optional[Tuple[torch.Tensor, Tuple[torch.Tensor],
+                       Tuple[torch.Tensor, ...]]],
     ]:
         """
         Forward pass of the JetMoEAttention module.
@@ -553,13 +577,15 @@ class JetMoEFlashAttention2(JetMoEAttention):
         # assert attention_mask is None, "attention_mask is not supported"
         assert output_attentions is False, "output_attentions is not supported"
 
-        B, T, C = hidden_states.size()  # batch size, sequence length, embedding dimensionality (hidden_size)
+        # batch size, sequence length, embedding dimensionality (hidden_size)
+        B, T, C = hidden_states.size()
 
         # calculate query, key, values
         query_layer, aux_loss = self.experts.map(hidden_states)
         key_layer, value_layer = self.kv_proj(hidden_states).chunk(2, dim=-1)
 
-        query_layer = query_layer.view(B, T, self.num_heads, self.hidden_size_per_attention_head)  # (B, T, k * nh, hs)
+        query_layer = query_layer.view(
+            B, T, self.num_heads, self.hidden_size_per_attention_head)  # (B, T, k * nh, hs)
         key_layer = key_layer.view(
             B, T, self.num_key_value_heads, self.hidden_size_per_attention_head
         )  # (B, T, nh, hs)
@@ -575,9 +601,11 @@ class JetMoEFlashAttention2(JetMoEAttention):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            kv_seq_len += past_key_value.get_usable_length(
+                kv_seq_len, self.layer_idx)
         cos, sin = self.rotary_emb(value_layer, seq_len=kv_seq_len)
-        query_layer, key_layer = apply_rotary_pos_emb(query_layer, key_layer, cos, sin, position_ids)
+        query_layer, key_layer = apply_rotary_pos_emb(
+            query_layer, key_layer, cos, sin, position_ids)
 
         # query_layer = query_layer.contiguous()
         # expand the key_layer and value_layer [sk, b, ng, hn] -> [sk, b, np, hn]
@@ -589,7 +617,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
             # print(self.layer_idx, key_layer.size())
             key_layer = key_layer.transpose(1, 2)
             value_layer = value_layer.transpose(1, 2)
-            key_layer, value_layer = past_key_value.update(key_layer, value_layer, self.layer_idx, cache_kwargs)
+            key_layer, value_layer = past_key_value.update(
+                key_layer, value_layer, self.layer_idx, cache_kwargs)
             key_layer = key_layer.transpose(1, 2)
             value_layer = value_layer.transpose(1, 2)
 
@@ -602,7 +631,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
         )
 
         # output projection
-        y = self.experts.reduce(context_layer.reshape(T, B, self.top_k, self.kv_projection_size))
+        y = self.experts.reduce(context_layer.reshape(
+            T, B, self.top_k, self.kv_projection_size))
         y = y.view(B, T, C)  # re-assemble all head outputs side by side
 
         if not output_attentions:
@@ -668,7 +698,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
                 causal=causal,
             )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(
+                attn_output_unpad, indices_q, batch_size, query_length)
         else:
             attn_output = flash_attn_func(
                 query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal
@@ -677,18 +708,22 @@ class JetMoEFlashAttention2(JetMoEAttention):
         return attn_output
 
     def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
-        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
+            attention_mask)
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            key_layer.reshape(batch_size * kv_seq_len,
+                              num_key_value_heads, head_dim), indices_k
         )
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            value_layer.reshape(batch_size * kv_seq_len,
+                                num_key_value_heads, head_dim), indices_k
         )
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+                query_layer.reshape(batch_size * kv_seq_len,
+                                    self.num_heads, head_dim), indices_k
             )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
@@ -703,7 +738,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(
+                query_layer, attention_mask)
 
         return (
             query_layer,
@@ -717,8 +753,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
 
 JETMOE_ATTENTION_CLASSES = {
     "eager": JetMoEAttention,
-    "flash_attention_2": JetMoEFlashAttention2,
-    "sdpa": JetMoESdpaAttention,
+    "flash_attention_2": JetMoEFlashAttention2, #use flashattention2
+    "sdpa": JetMoESdpaAttention,# use torch scaled_dot_product_attention
 }
 
 
@@ -732,7 +768,8 @@ class JetMoEBlock(nn.Module):
         """
         super().__init__()
         self.input_layernorm = JetMoERMSNorm(config.hidden_size)
-        self.self_attention = JETMOE_ATTENTION_CLASSES[config._attn_implementation](config, layer_idx)
+        self.self_attention = JETMOE_ATTENTION_CLASSES[config._attn_implementation](
+            config, layer_idx)
         self.post_attention_layernorm = JetMoERMSNorm(config.hidden_size)
 
         self.mlp = MoE(
@@ -781,7 +818,8 @@ class JetMoEBlock(nn.Module):
         )
 
         hidden_states = hidden_states + attn_output
-        x_mlp, mlp_aux_loss = self.mlp(self.post_attention_layernorm(hidden_states))
+        x_mlp, mlp_aux_loss = self.mlp(
+            self.post_attention_layernorm(hidden_states))
         hidden_states = hidden_states + x_mlp
 
         outputs = (hidden_states,)
@@ -829,18 +867,21 @@ class JetMoEPreTrainedModel(PreTrainedModel):
         if isinstance(module, (nn.Linear,)):
             # Slightly different from Mesh Transformer JAX which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            module.weight.data.normal_(
+                mean=0.0, std=self.config.initializer_range)
             if module.bias is not None:
                 module.bias.data.zero_()
         elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            module.weight.data.normal_(
+                mean=0.0, std=self.config.initializer_range)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
         elif isinstance(module, ParallelExperts):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+            module.weight.data.normal_(
+                mean=0.0, std=self.config.initializer_range)
 
     # def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={}):
     #     for module in self.modules():
@@ -955,8 +996,10 @@ class JetMoEModel(JetMoEPreTrainedModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([JetMoEBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx)
+        self.layers = nn.ModuleList(
+            [JetMoEBlock(config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self._attn_implementation = config._attn_implementation
         self.norm = JetMoERMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -993,13 +1036,15 @@ class JetMoEModel(JetMoEPreTrainedModel):
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
+            raise ValueError(
+                "You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape
         elif inputs_embeds is not None:
             batch_size, seq_length, _ = inputs_embeds.shape
         else:
-            raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
+            raise ValueError(
+                "You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         if self.gradient_checkpointing and self.training:
             if use_cache:
@@ -1013,8 +1058,10 @@ class JetMoEModel(JetMoEPreTrainedModel):
         if use_cache:
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
-                past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+                past_key_values = DynamicCache.from_legacy_cache(
+                    past_key_values)
+            past_key_values_length = past_key_values.get_usable_length(
+                seq_length)
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -1039,7 +1086,8 @@ class JetMoEModel(JetMoEPreTrainedModel):
 
         if self._attn_implementation == "flash_attention_2":
             # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
+            attention_mask = attention_mask if (
+                attention_mask is not None and 0 in attention_mask) else None
         elif self._attn_implementation == "sdpa" and not output_attentions:
             # output_attentions=True can not be supported when using SDPA, and we fall back on
             # the manual implementation that requires a 4D causal mask in all cases.
@@ -1117,7 +1165,8 @@ class JetMoEModel(JetMoEPreTrainedModel):
 
         next_cache = None
         if use_cache:
-            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+            next_cache = next_decoder_cache.to_legacy_cache(
+            ) if use_legacy_cache else next_decoder_cache
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
@@ -1138,7 +1187,8 @@ class JetMoEForCausalLM(JetMoEPreTrainedModel):
         self.model = JetMoEModel(config)
         self.vocab_size = config.vocab_size
         self.aux_loss_coef = getattr(config, "aux_loss_coef", 0.01)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(
+            config.hidden_size, config.vocab_size, bias=False)
         self.tie_word_embeddings = config.tie_word_embeddings
 
         # Initialize weights and apply final processing
@@ -1257,7 +1307,8 @@ class JetMoEForCausalLM(JetMoEPreTrainedModel):
             # some of the inputs are exclusively passed as part of the cache (e.g. when passing input_embeds as
             # input)
             if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
+                input_ids = input_ids[:, -
+                                      (attention_mask.shape[1] - past_length):]
             # 2 - If the past_length is smaller than input_ids', then input_ids holds all input tokens. We can discard
             # input_ids based on the past_length.
             elif past_length < input_ids.shape[1]:
@@ -1278,7 +1329,7 @@ class JetMoEForCausalLM(JetMoEPreTrainedModel):
             position_ids = attention_mask.long().cumsum(-1) - 1
             position_ids.masked_fill_(attention_mask == 0, 1)
             if past_key_values:
-                position_ids = position_ids[:, -input_ids.shape[1] :]
+                position_ids = position_ids[:, -input_ids.shape[1]:]
 
         # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
         if inputs_embeds is not None and past_key_values is None:
@@ -1301,7 +1352,8 @@ class JetMoEForCausalLM(JetMoEPreTrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:
             reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
+                tuple(past_state.index_select(0, beam_idx.to(past_state.device))
+                      for past_state in layer_past),
             )
         return reordered_past
 
@@ -1380,19 +1432,22 @@ class JetMoEForSequenceClassification(JetMoEPreTrainedModel):
             batch_size = inputs_embeds.shape[0]
 
         if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined.")
         if self.config.pad_token_id is None:
             sequence_lengths = -1
         else:
             if input_ids is not None:
                 # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
-                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                sequence_lengths = torch.eq(
+                    input_ids, self.config.pad_token_id).int().argmax(-1) - 1
                 sequence_lengths = sequence_lengths % input_ids.shape[-1]
                 sequence_lengths = sequence_lengths.to(logits.device)
             else:
                 sequence_lengths = -1
 
-        pooled_logits = logits[torch.arange(batch_size, device=logits.device), sequence_lengths]
+        pooled_logits = logits[torch.arange(
+            batch_size, device=logits.device), sequence_lengths]
 
         loss = None
         if labels is not None:
@@ -1413,7 +1468,8 @@ class JetMoEForSequenceClassification(JetMoEPreTrainedModel):
                     loss = loss_fct(pooled_logits, labels)
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(
+                    pooled_logits.view(-1, self.num_labels), labels.view(-1))
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
