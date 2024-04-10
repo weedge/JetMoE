@@ -49,14 +49,26 @@ class top_k_gating(nn.Module):
         Returns:
             torch.Tensor: The calculated auxiliary loss.
         """
+        # 获取 logits 张量的批次大小，即样本数量
         count = logits.size(0)
+        # 计算每个专家被选中的概率之和，即将概率沿着批次维度求和。
+        # probs 是一个张量，其每个元素表示对应专家被选中的概率。
         probs = probs.sum(0)
+        # 计算每个专家被选中的频率，即计算门控值大于0的次数（即专家被选中的次数），
+        # 然后将其沿着批次维度求和。
+        # gates 是一个张量，其每个元素表示对应专家被选中的门控值。
         freq = (gates > 0).float().sum(0)
+        # 计算 logits 张量经过 softmax 处理后的平方和的对数。
+        # 这里首先使用 softmax 函数将 logits 转换为概率分布，
+        # 然后计算概率分布的每个样本的平方和，并取对数，最后将结果沿着批次维度求和。
         lsesq = (torch.log(torch.exp(logits).sum(dim=-1)) ** 2).sum()
 
+        # 计算专家选择损失，其计算方式为对每个专家的概率和频率进行归一化，然后计算它们的点积，最后将结果乘以专家数量。
         switchloss = self.num_experts * \
             (F.normalize(probs, p=1, dim=0) * F.normalize(freq, p=1, dim=0)).sum()
+        # 计算 z 损失，即 logits 的对数平方和除以样本数量
         zloss = lsesq / count
+        # 将专家选择损失和 z 损失加权相加得到最终的辅助损失
         loss = switchloss + 0.1 * zloss
 
         return loss
@@ -83,11 +95,17 @@ class top_k_gating(nn.Module):
         """
 
         logits = self.layer(x).float()
+        print(logits)
+        # 对logits进行按行（即每个样本）的top-k操作，返回前k个最大值的对应logits和索引
         top_k_logits, top_k_indices = logits.topk(self.top_k, dim=1)
+        print(top_k_logits, top_k_indices)
+        # 对top_k_logits进行softmax操作，得到对应的门控值（gates），这里的门控值表示对应的专家在预测中所占的比例
         top_k_gates = torch.softmax(top_k_logits, dim=1).type_as(x)
 
-        # 训练时才计算loss值
+        # 训练时才计算辅助loss值, 为了专家之间的负载平衡
         if self.training:
+            # from: switch transformer: https://arxiv.org/pdf/2101.03961.pdf  A Differentiable Load Balancing Loss
+            # 对logits进行softmax操作，得到每个类别的概率分布
             probs = torch.softmax(logits, dim=1)
             zeros = torch.zeros_like(probs)
             # Convert zeros to match top_k_gates dtype
@@ -98,3 +116,17 @@ class top_k_gating(nn.Module):
             self.loss = 0
 
         return top_k_indices, top_k_gates
+
+
+if __name__ == "__main__":
+    # Testing this out, again:
+    num_experts = 8
+    top_k = 2
+    n_embd = 16
+
+    input = torch.randn(2, 4, n_embd)  # Example input
+    input = input.reshape(-1,n_embd)
+    noisy_top_k_gate = top_k_gating(n_embd, num_experts, top_k)
+    top_k_indices, top_k_gates = noisy_top_k_gate(input)
+    print(top_k_gates.shape, top_k_gates)
+    print(top_k_indices.shape, top_k_indices)

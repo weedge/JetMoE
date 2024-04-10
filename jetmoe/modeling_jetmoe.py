@@ -309,20 +309,22 @@ class JetMoEAttention(nn.Module):
 
         self.top_k = config.moe_top_k
 
-        self.kv_projection_size = config.kv_channels * config.num_key_value_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_heads = config.num_attention_heads
-        assert self.num_heads == self.num_key_value_heads * config.moe_top_k
-        self.hidden_size_per_attention_head = config.kv_channels
+        self.kv_projection_size = config.kv_channels * \
+            config.num_key_value_heads  # 2048 = 128*16
+        self.num_key_value_heads = config.num_key_value_heads  # 16
+        self.num_heads = config.num_attention_heads  # 32
+        assert self.num_heads == self.num_key_value_heads * config.moe_top_k  # 32=16*2
+        self.hidden_size_per_attention_head = config.kv_channels  # 128 head_size
 
         self.experts = MoE(
-            input_size=config.hidden_size,
-            hidden_size=self.kv_projection_size,
-            num_experts=config.moe_num_experts,
-            top_k=config.moe_top_k,
+            input_size=config.hidden_size,  # 2048
+            hidden_size=self.kv_projection_size,  # 2048
+            num_experts=config.moe_num_experts,  # 8
+            top_k=config.moe_top_k,  # 2
             glu=False,
         )
 
+        # 2048 -> 2048*2
         self.kv_proj = torch.nn.Linear(
             config.hidden_size, self.kv_projection_size * 2, bias=False)
 
@@ -425,6 +427,9 @@ class JetMoEAttention(nn.Module):
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.hidden_size_per_attention_head)}, but is"
                 f" {attn_output.size()}"
             )
+
+        assert self.num_heads * self.hidden_size_per_attention_head == self.top_k * \
+            self.kv_projection_size # 32*128 = 2*2048
 
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(
@@ -753,8 +758,8 @@ class JetMoEFlashAttention2(JetMoEAttention):
 
 JETMOE_ATTENTION_CLASSES = {
     "eager": JetMoEAttention,
-    "flash_attention_2": JetMoEFlashAttention2, #use flashattention2
-    "sdpa": JetMoESdpaAttention,# use torch scaled_dot_product_attention
+    "flash_attention_2": JetMoEFlashAttention2,  # use flashattention2
+    "sdpa": JetMoESdpaAttention,  # use torch scaled_dot_product_attention
 }
 
 

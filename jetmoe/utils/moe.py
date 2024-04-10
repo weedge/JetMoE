@@ -318,3 +318,18 @@ class MoE(nn.Module):
             return self.single_reduce(x)
         else:
             return self.batch_reduce(x)
+
+
+if __name__ == "__main__":
+    # Testing this out, again:
+    num_experts = 8
+    top_k = 2
+    n_embd = 16
+
+    input = torch.randn(2, 4, n_embd)  # Example input
+    input = input.reshape(-1,n_embd)
+
+    noisy_top_k_gate = top_k_gating(n_embd, num_experts, top_k)
+    top_k_indices, top_k_gates = noisy_top_k_gate(input)
+    print(top_k_gates.shape, top_k_gates)
+    print(top_k_indices.shape, top_k_indices)
